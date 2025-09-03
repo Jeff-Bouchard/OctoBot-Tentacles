@@ -38,8 +38,9 @@ import octobot_trading.modes as trading_modes
 import octobot_trading.exchanges as trading_exchanges
 import octobot_trading.storage as trading_storage
 import octobot_trading.enums as trading_enums
-import octobot_commons.constants as commons_constants
-import octobot_commons.logging as bot_logging
+from octobot_commons.enums.time_frames import TimeFrames
+from octobot_commons.exchanges.exchange_configs import CcxtExchangeConfig
+from tentacles.Exchange.BitShares import config as bts_config
 import octobot_commons.enums as commons_enums
 import octobot_commons.databases as commons_databases
 import octobot_commons.configuration as configuration
@@ -896,6 +897,10 @@ def _get_filtered_exchange_symbols(symbols):
 
 
 async def _load_market(exchange, results):
+    if exchange == "bitshares":
+        markets_by_exchanges[exchange] = _get_filtered_exchange_symbols(bts_config.ENABLED_MARKETS)
+        results.append(markets_by_exchanges[exchange])
+        return
     try:
         if exchange in auto_filled_exchanges():
             async with trading_api.get_new_ccxt_client(
