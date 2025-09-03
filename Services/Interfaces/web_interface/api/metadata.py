@@ -28,7 +28,12 @@ def register(blueprint):
     def ping():
         start_time = interfaces.get_bot_api().get_start_time()
         return json.dumps(
+<<<<<<< HEAD
             f"Running since {timestamp_util.convert_timestamp_to_datetime(start_time, '%Y-%m-%d %H:%M:%S')}."
+=======
+            f"Running since "
+            f"{timestamp_util.convert_timestamp_to_datetime(start_time, '%Y-%m-%d %H:%M:%S', True)}."
+>>>>>>> c9da11ba (inject)
         )
 
 

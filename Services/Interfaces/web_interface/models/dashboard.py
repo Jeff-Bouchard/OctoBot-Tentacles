@@ -66,7 +66,14 @@ def format_trades(dict_trade_history):
             trade_time = dict_trade[trading_enums.ExchangeConstantsOrderColumns.TIMESTAMP.value]
             if trade_time > trading_constants.MINIMUM_VAL_TRADE_TIME:
                 trades[trade_time_key].append(
+<<<<<<< HEAD
                     timestamp_util.convert_timestamp_to_datetime(trade_time, time_format="%y-%m-%d %H:%M:%S"))
+=======
+                    timestamp_util.convert_timestamp_to_datetime(
+                        trade_time, "%y-%m-%d %H:%M:%S", True
+                    )
+                )
+>>>>>>> c9da11ba (inject)
                 trades[trade_price_key].append(
                     float(dict_trade[trading_enums.ExchangeConstantsOrderColumns.PRICE.value]))
                 trades[trade_description_key].append(
@@ -96,7 +103,11 @@ def format_orders(order, min_order_time):
             formatted_orders[time_key].append(
                 timestamp_util.convert_timestamp_to_datetime(
                     max(min_order_time, order.creation_time),
+<<<<<<< HEAD
                     time_format="%y-%m-%d %H:%M:%S"
+=======
+                    "%y-%m-%d %H:%M:%S", True
+>>>>>>> c9da11ba (inject)
                 )
             )
             formatted_orders[price_key].append(float(order.origin_price))
