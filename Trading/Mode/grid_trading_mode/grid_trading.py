@@ -69,17 +69,17 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             default_config[self.CONFIG_FLAT_SPREAD], inputs,
             min_val=0, other_schema_values={"exclusiveMinimum": True},
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
-            title="Spread: price difference between the closest buy and sell orders. Denominated in the quote currency "
-                  "(600 for a 600 USDT spread on BTC/USDT).",
+            title="Spread: price difference between the closest buy and sell orders in the quote currency "
+                  "(USDT for BTC/USDT).",
         )
         self.UI.user_input(
             self.CONFIG_FLAT_INCREMENT, commons_enums.UserInputTypes.FLOAT,
             default_config[self.CONFIG_FLAT_INCREMENT], inputs,
             min_val=0, other_schema_values={"exclusiveMinimum": True},
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
-            title="Increment: price difference between two orders of the same side. Denominated in the quote currency "
-                  "(200 for a 200 USDT spread on BTC/USDT). "
-                  "WARNING: this should be lower than the Spread value: profitability is close to Spread-Increment.",
+            title="Increment: price difference between two orders of the same side in the quote currency (USDT for "
+                  "BTC/USDT). WARNING: this should be lower than the Spread value: profitability is close to "
+                  "Spread-Increment.",
         )
         self.UI.user_input(
             self.CONFIG_BUY_ORDERS_COUNT, commons_enums.UserInputTypes.INT,
@@ -102,20 +102,18 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             default_config[self.CONFIG_BUY_FUNDS], inputs,
             min_val=0,
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
-            title="[Optional] Total buy funds: total funds to use for buy orders creation. "
-                  "Denominated in quote currency: enter 1000 to create a grid on BTC/USDT using up to a total of 1000 "
-                  "USDT in its buy orders. Set 0 to use all available funds in portfolio. "
-                  "A value is required to use the same currency simultaneously in multiple traded pairs.",
+            title="[Optional] Total buy funds: total funds to use for buy orders creation (in quote currency: USDT "
+                  "for BTC/USDT). Set 0 to use all available funds in portfolio. Allows to use the same currency "
+                  "simultaneously in multiple traded pairs.",
         )
         self.UI.user_input(
             self.CONFIG_SELL_FUNDS, commons_enums.UserInputTypes.FLOAT,
             default_config[self.CONFIG_SELL_FUNDS], inputs,
             min_val=0,
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
-            title="[Optional] Total sell funds: total funds to use for sell orders creation. "
-                  "Denominated in base currency: enter 0.01 to create a grid on BTC/USDT using up to a total of 0.01 "
-                  "BTC in its sell orders. Set 0 to use all available funds in portfolio. "
-                  "A value is required to use the same currency simultaneously in multiple traded pairs.",
+            title="[Optional] Total sell funds: total funds to use for sell orders creation (in base currency: "
+                  "BTC for BTC/USDT). Set 0 to use all available funds in portfolio. Allows to use the same "
+                  "currency simultaneously in multiple traded pairs.",
         )
         self.UI.user_input(
             self.CONFIG_STARTING_PRICE, commons_enums.UserInputTypes.FLOAT,
@@ -131,7 +129,7 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             min_val=0,
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
             title="[Optional] Buy orders volume: volume of each buy order in base currency. Set 0 to use all "
-                  "available funds in portfolio (or total buy funds if set) and create orders with constant "
+                  "available funds in portfolio (or total buy funds if set) to create orders with constant "
                   "total order cost (price * volume).",
         )
         self.UI.user_input(
@@ -140,7 +138,7 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             min_val=0,
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
             title="[Optional] Sell orders volume: volume of each sell order in base currency. Set 0 to use all "
-                  "available funds in portfolio (or total sell funds if set) and create orders with constant "
+                  "available funds in portfolio (or total sell funds if set) to create orders with constant "
                   "total order cost (price * volume).",
         )
         self.UI.user_input(
@@ -158,6 +156,13 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
             title="[Optional] Mirror order delay: Seconds to wait for before creating a mirror order when an order "
                   "is filled. This can generate extra profits on quick market moves.",
+        )
+        self.UI.user_input(
+            self.CONFIG_USE_FIXED_VOLUMES_FOR_MIRROR_ORDERS, commons_enums.UserInputTypes.BOOLEAN,
+            default_config[self.CONFIG_USE_FIXED_VOLUMES_FOR_MIRROR_ORDERS], inputs,
+            parent_input_name=self.CONFIG_PAIR_SETTINGS,
+            title="Fixed volume on mirror orders: when checked, sell and buy orders volume settings will be used for "
+                  "mirror orders. WARNING: incompatible with 'Ignore exchange fees'.",
         )
         self.UI.user_input(
             self.CONFIG_USE_EXISTING_ORDERS_ONLY, commons_enums.UserInputTypes.BOOLEAN,
@@ -198,11 +203,12 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
             default_config[self.CONFIG_FUNDS_REDISPATCH_INTERVAL], inputs,
             parent_input_name=self.CONFIG_PAIR_SETTINGS,
             title="Auto-dispatch interval: hours between each funds redispatch check.",
-            editor_options={
-                commons_enums.UserInputOtherSchemaValuesTypes.DEPENDENCIES.value: {
-                  self.CONFIG_ALLOW_FUNDS_REDISPATCH: True
-                }
-            }
+            # dependency disabled: conditional display is not working properly
+            # editor_options={
+            #     commons_enums.UserInputOtherSchemaValuesTypes.DEPENDENCIES.value: {
+            #       self.CONFIG_ALLOW_FUNDS_REDISPATCH: True
+            #     }
+            # }
         )
 
     @classmethod
@@ -222,8 +228,9 @@ class GridTradingMode(staggered_orders_trading.StaggeredOrdersTradingMode):
           cls.CONFIG_STARTING_PRICE: 0,
           cls.CONFIG_BUY_VOLUME_PER_ORDER: 0,
           cls.CONFIG_SELL_VOLUME_PER_ORDER: 0,
-          cls.CONFIG_IGNORE_EXCHANGE_FEES: True,
+          cls.CONFIG_IGNORE_EXCHANGE_FEES: False,
           cls.CONFIG_MIRROR_ORDER_DELAY: 0,
+          cls.CONFIG_USE_FIXED_VOLUMES_FOR_MIRROR_ORDERS: False,
           cls.CONFIG_USE_EXISTING_ORDERS_ONLY: False,
           cls.CONFIG_ALLOW_FUNDS_REDISPATCH: False,
           cls.CONFIG_ENABLE_TRAILING_UP: enable_trailing_up or False,
@@ -315,8 +322,15 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
                                                                                        self.buy_volume_per_order)))
         self.limit_orders_count_if_necessary = \
             self.symbol_trading_config.get(self.trading_mode.LIMIT_ORDERS_IF_NECESSARY, True)
+        # tmp: ensure "reinvest_profits" legacy param still works
+        self.ignore_exchange_fees = self.symbol_trading_config.get("reinvest_profits", self.ignore_exchange_fees)
+        # end tmp
         self.ignore_exchange_fees = self.symbol_trading_config.get(self.trading_mode.CONFIG_IGNORE_EXCHANGE_FEES,
                                                                    self.ignore_exchange_fees)
+        self.use_fixed_volume_for_mirror_orders = self.symbol_trading_config.get(
+            self.trading_mode.CONFIG_USE_FIXED_VOLUMES_FOR_MIRROR_ORDERS,
+            self.use_fixed_volume_for_mirror_orders
+        )
         self.use_existing_orders_only = self.symbol_trading_config.get(self.trading_mode.CONFIG_USE_EXISTING_ORDERS_ONLY,
                                                                        self.use_existing_orders_only)
         self.mirror_order_delay = self.symbol_trading_config.get(self.trading_mode.CONFIG_MIRROR_ORDER_DELAY,
@@ -352,13 +366,11 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
                     )
                     return
                 # use exchange level lock to prevent funds double spend
-                buy_orders, sell_orders, triggering_trailing, create_order_dependencies = await self._generate_staggered_orders(
+                buy_orders, sell_orders, triggering_trailing = await self._generate_staggered_orders(
                     current_price, ignore_available_funds, trigger_trailing
                 )
                 grid_orders = self._merged_and_sort_not_virtual_orders(buy_orders, sell_orders)
-                await self._create_not_virtual_orders(
-                    grid_orders, current_price, triggering_trailing, create_order_dependencies
-                )
+                await self._create_not_virtual_orders(grid_orders, current_price, triggering_trailing)
 
     async def trigger_staggered_orders_creation(self):
         # reload configuration
@@ -408,7 +420,7 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
                     f"set 'Total buy funds' and 'Total sell funds' in your {self.trading_mode.get_name()} "
                     f"{self.symbol} configuration."
                 )
-                return [], [], False, None
+                return [], [], False
         existing_orders = order_manager.get_open_orders(self.symbol)
 
         sorted_orders = self._get_grid_trades_or_orders(existing_orders)
@@ -475,10 +487,8 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
                         # use only open order prices when possible
                         _lowest_buy = buy_orders[0].origin_price
                         lowest_sell = max(current_price, _lowest_buy - self.flat_spread + self.flat_increment)
-        next_step_dependencies = None
         if trigger_trailing:
-            # trailing has no initial dependencies here
-            _, __, next_step_dependencies = await self._prepare_trailing(sorted_orders, current_price, None)
+            await self._prepare_trailing(sorted_orders, current_price)
             self.is_currently_trailing = True
             # trailing will cancel all orders: set state to NEW with no existing order
             missing_orders, state, sorted_orders = None, self.NEW, []
@@ -511,18 +521,17 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
 
             if state is self.FILL:
                 self._ensure_used_funds(buy_orders, sell_orders, sorted_orders, recently_closed_trades)
-            create_order_dependencies = next_step_dependencies
         except staggered_orders_trading.ForceResetOrdersException:
             lowest_buy = max(trading_constants.ZERO, self.buy_price_range.lower_bound)
             highest_buy = self.buy_price_range.higher_bound
             lowest_sell = self.sell_price_range.lower_bound
             highest_sell = self.sell_price_range.higher_bound
-            buy_orders, sell_orders, state, create_order_dependencies = await self._reset_orders(
-                sorted_orders, lowest_buy, highest_buy, lowest_sell, highest_sell, current_price, ignore_available_funds, next_step_dependencies
+            buy_orders, sell_orders, state = await self._reset_orders(
+                sorted_orders, lowest_buy, highest_buy, lowest_sell, highest_sell, current_price, ignore_available_funds
             )
             trigger_trailing = False
 
-        return buy_orders, sell_orders, trigger_trailing, create_order_dependencies
+        return buy_orders, sell_orders, trigger_trailing
 
     def _get_origin_orders_count(self, recent_trades, open_orders):
         origin_created_buy_orders_count = self.buy_orders_count
@@ -544,7 +553,6 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
         four = decimal.Decimal("4")
         increment_lower_bound = - self.flat_increment / four
         increment_higher_bound = self.flat_increment / four
-        filtered_out_orders = []
         for first_element_index in range(len(sorted_elements)):
             grid_trades_or_orders = []
             previous_element = None
@@ -560,22 +568,9 @@ class GridTradingModeProducer(staggered_orders_trading.StaggeredOrdersTradingMod
                         first_sided_element_price += self.flat_spread
                     delta_increment = (self.get_trade_or_order_price(trade_or_order) - first_sided_element_price) \
                         % self.flat_increment
-                    if (
-                        # delta is between -25%*increment and 25%*increment
-                        increment_lower_bound < delta_increment < increment_higher_bound
-                    ) or (
-                        # delta is between 75%*increment and increment
-                        self.flat_increment - increment_higher_bound < delta_increment < self.flat_increment
-                    ):
+                    if increment_lower_bound < delta_increment < increment_higher_bound:
                         grid_trades_or_orders.append(trade_or_order)
-                    else:
-                        filtered_out_orders.append(trade_or_order)
                 previous_element = trade_or_order
-            if filtered_out_orders:
-                self.logger.info(
-                    f"Filtered out {len(filtered_out_orders)} {self.symbol} non grid orders out of "
-                    f"{len(trades_or_orders)} [{self.exchange_manager.exchange_name}] orders"
-                )
             if len(grid_trades_or_orders) / len(sorted_elements) > 0.5:
                 # make sure that we did not miss every grid trade by basing computations on a non grid trade
                 # more than 50% match of grid trades: grid trades are found

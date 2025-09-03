@@ -22,7 +22,6 @@ import octobot_commons.symbols.symbol_util as symbol_util
 import octobot_commons.enums as commons_enums
 import octobot_commons.constants as commons_constants
 import octobot_commons.evaluators_util as evaluators_util
-import octobot_commons.signals as commons_signals
 
 import octobot_evaluators.api as evaluators_api
 import octobot_evaluators.constants as evaluators_constants
@@ -73,8 +72,6 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
 
     async def create_new_orders(self, symbol, _, state, **kwargs):
         current_order = None
-        initial_dependencies = kwargs.get(self.CREATE_ORDER_DEPENDENCIES_PARAM, None)
-        post_cancel_dependencies = None
         try:
             price = await trading_personal_data.get_up_to_date_price(
                 self.exchange_manager, symbol, timeout=trading_constants.ORDER_DATA_FETCHING_TIMEOUT
@@ -102,9 +99,8 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
                         )
                     )
                 if self.trading_mode.cancel_open_orders_at_each_entry:
-                    post_cancel_dependencies = await self._cancel_existing_orders_if_replaceable(
-                        ctx, symbol, user_amount, price, initial_entry_price, 
-                        side, symbol_market, initial_dependencies
+                    await self._cancel_existing_orders_if_replaceable(
+                        ctx, symbol, user_amount, price, initial_entry_price, side, symbol_market
                     )
 
                 quantity = await script_keywords.get_amount_from_input_amount(
@@ -162,24 +158,18 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
             # initial entry
             orders_should_have_been_created = await self._create_entry_order(
                 initial_entry_order_type, adapted_entry_quantity, initial_entry_price,
-                symbol_market, symbol, created_orders, price, post_cancel_dependencies
+                symbol_market, symbol, created_orders, price
             )
             # secondary entries
             if self.trading_mode.use_secondary_entry_orders and self.trading_mode.secondary_entry_orders_count > 0:
                 secondary_order_type = trading_enums.TraderOrderType.BUY_LIMIT \
                     if side is trading_enums.TradeOrderSide.BUY else trading_enums.TraderOrderType.SELL_LIMIT
                 if not secondary_quantity:
-                    if self.trading_mode.secondary_entry_orders_amount:
-                        self.logger.warning(
-                            f"Impossible to create {side.value} secondary entry order: computed quantity is {secondary_quantity}, "
-                            f"configured quantity is: {self.trading_mode.secondary_entry_orders_amount}."
-                        )
-                    else:
-                        self.logger.error(
-                            f"Missing {side.value} secondary entry order quantity in {self.trading_mode.get_name()} "
-                            f"configuration, please set the \"Secondary entry orders count\" value "
-                            f"when enabling secondary entry orders."
-                        )
+                    self.logger.error(
+                        f"Missing {side.value} secondary entry order quantity in {self.trading_mode.get_name()} "
+                        f"configuration, please set the \"Secondary entry orders amount\" value "
+                        f"when enabling secondary entry orders."
+                    )
                 else:
                     for i in range(self.trading_mode.secondary_entry_orders_count):
                         remaining_funds = initial_available_quote_funds - sum(
@@ -209,7 +199,7 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
                         )
                         if not await self._create_entry_order(
                             secondary_order_type, secondary_quantity, secondary_target_price,
-                            symbol_market, symbol, created_orders, price, post_cancel_dependencies
+                            symbol_market, symbol, created_orders, price
                         ):
                             # stop iterating if an order can't be created
                             self.logger.info(
@@ -234,14 +224,12 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
             return []
 
     async def _cancel_existing_orders_if_replaceable(
-        self, ctx, symbol, user_amount, price, initial_entry_price, 
-        side, symbol_market, dependencies
-    ) -> typing.Optional[commons_signals.SignalDependencies]:
-        next_step_dependencies = None
+        self, ctx, symbol, user_amount, price, initial_entry_price, side, symbol_market
+    ):
         if to_cancel_orders := [
             order
             for order in self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(symbol=symbol)
-            if not (order.is_cancelled() or order.is_closed() or order.is_partially_filled()) and side is order.side
+            if not (order.is_cancelled() or order.is_closed()) and side is order.side
         ]:
             # Cancel existing DCA orders of the same side from previous iterations
             # Edge cases about cancelling existing orders when recreating entry orders
@@ -257,18 +245,13 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
             # Conclusion:
             #   => Always cancel orders first except when exchange min amount would be reached in new
             #   buy orders
-            next_step_dependencies = commons_signals.SignalDependencies()
             can_create_entries = await self._can_create_entry_orders_regarding_min_exchange_order_size(
                 ctx, user_amount, price, initial_entry_price, side, symbol_market, to_cancel_orders
             )
             if can_create_entries:
                 for order in to_cancel_orders:
                     try:
-                        is_cancelled, new_dependencies = await self.trading_mode.cancel_order(
-                            order, dependencies=dependencies
-                        )
-                        if is_cancelled:
-                            next_step_dependencies.extend(new_dependencies)
+                        await self.trading_mode.cancel_order(order)
                     except trading_errors.UnexpectedExchangeSideOrderStateError as err:
                         self.logger.warning(f"Skipped order cancel: {err}, order: {order}")
             else:
@@ -276,7 +259,6 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
                     f"Skipping {self.exchange_manager.exchange_name} {symbol} entry order cancel as new "
                     f"entries are likely not complying with exchange minimal order size."
                 )
-        return next_step_dependencies or dependencies
 
     async def _can_create_entry_orders_regarding_min_exchange_order_size(
         self, ctx, user_amount, price, initial_entry_price, side, symbol_market, to_cancel_orders
@@ -329,8 +311,7 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
         )
 
     async def _create_entry_order(
-        self, order_type, quantity, price, symbol_market, 
-        symbol, created_orders, current_price, dependencies
+        self, order_type, quantity, price, symbol_market, symbol, created_orders, current_price
     ):
         if self._is_max_asset_ratio_reached(symbol):
             # do not create entry on symbol when max ratio is reached
@@ -351,9 +332,7 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
             )
             created_at_least_one_order = False
             try:
-                if created_order := await self._create_entry_with_chained_exit_orders(
-                    entry_order, price, symbol_market, dependencies
-                ):
+                if created_order := await self._create_entry_with_chained_exit_orders(entry_order, price, symbol_market):
                     created_orders.append(created_order)
                     created_at_least_one_order = True
                     return True
@@ -382,34 +361,29 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
             self.logger.exception(err, True, f"Error when creating error message {err}")
         return False
 
-    async def _create_entry_with_chained_exit_orders(
-        self, entry_order, entry_price, symbol_market, dependencies
-    ):
+    async def _create_entry_with_chained_exit_orders(self, entry_order, entry_price, symbol_market):
         params = {}
-        exit_side = (
-            trading_enums.TradeOrderSide.SELL 
-            if entry_order.side is trading_enums.TradeOrderSide.BUY
+        exit_side = trading_enums.TradeOrderSide.SELL if entry_order.side is trading_enums.TradeOrderSide.BUY \
             else trading_enums.TradeOrderSide.BUY
-        )
         exit_multiplier_side_flag = 1 if exit_side is trading_enums.TradeOrderSide.SELL else -1
         total_exists_count = 1 + (
             self.trading_mode.secondary_exit_orders_count if self.trading_mode.use_secondary_exit_orders else 0
         )
         stop_price = entry_price * (
-            trading_constants.ONE - (
-                self.trading_mode.stop_loss_price_multiplier * exit_multiplier_side_flag
-            )
+                trading_constants.ONE - (
+                    self.trading_mode.stop_loss_price_multiplier * exit_multiplier_side_flag
+                )
         )
         first_sell_price = entry_price * (
-            trading_constants.ONE + (
-                self.trading_mode.exit_limit_orders_price_multiplier * exit_multiplier_side_flag
-            )
+                trading_constants.ONE + (
+                    self.trading_mode.exit_limit_orders_price_multiplier * exit_multiplier_side_flag
+                )
         )
         last_sell_price = entry_price * (
-            trading_constants.ONE + (
-                self.trading_mode.secondary_exit_orders_price_multiplier *
-                (1 + self.trading_mode.secondary_exit_orders_count) * exit_multiplier_side_flag
-            )
+                trading_constants.ONE + (
+                    self.trading_mode.secondary_exit_orders_price_multiplier *
+                    (1 + self.trading_mode.secondary_exit_orders_count) * exit_multiplier_side_flag
+                )
         )
         # split entry into multiple exits if necessary (and possible)
         exit_quantities = self._split_entry_quantity(
@@ -488,9 +462,7 @@ class DCATradingModeConsumer(trading_modes.AbstractTradingModeConsumer):
                 # in futures, inactive orders are not necessary
                 if self.exchange_manager.trader.enable_inactive_orders and not self.exchange_manager.is_future:
                     await oco_group.active_order_swap_strategy.apply_inactive_orders(order_couple)
-        return await self.trading_mode.create_order(
-            entry_order, params=params or None, dependencies=dependencies
-        )
+        return await self.trading_mode.create_order(entry_order, params=params or None)
 
     def _is_max_asset_ratio_reached(self, symbol):
         if self.exchange_manager.is_future:
@@ -1140,11 +1112,6 @@ class DCATradingMode(trading_modes.AbstractTradingMode):
             for order in self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders() + chained_orders
             if order.side is trading_enums.TradeOrderSide.SELL
         ]
-        partially_filled_buy_orders = [
-            order
-            for order in self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders()
-            if order.side is trading_enums.TradeOrderSide.BUY and order.is_partially_filled()
-        ]
         orphan_asset_values_by_asset = {}
         total_traded_assets_value = value_holder.value_converter.evaluate_value(
             common_quote,
@@ -1168,16 +1135,8 @@ class DCATradingMode(trading_modes.AbstractTradingMode):
                 for order in sell_orders
                 if symbol_util.parse_symbol(order.symbol).base == asset
             )
-            holdings_from_partially_filled_buy_orders = sum(
-                order.filled_quantity
-                for order in partially_filled_buy_orders
-                if symbol_util.parse_symbol(order.symbol).base == asset
-            )
             # do not consider more than the available amounts
-            orphan_amount = min(
-                asset_holding.total - holdings_in_sell_orders - holdings_from_partially_filled_buy_orders, 
-                asset_holding.available
-            )
+            orphan_amount = min(asset_holding.total - holdings_in_sell_orders, asset_holding.available)
             if orphan_amount and orphan_amount > 0:
                 orphan_asset_values_by_asset[asset] = (
                     holdings_value * orphan_amount / asset_holding.total, orphan_amount

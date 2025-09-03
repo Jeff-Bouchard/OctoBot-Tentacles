@@ -8,14 +8,14 @@ WSS_NODES = [
 ]
 
 # Trading account name
-ACCOUNT_NAME = ""
+ACCOUNT_NAME = "ness-privateness"
 
 # Enabled markets (BitShares asset symbols). Use exact on-chain symbols.
 # Format: "BASE/QUOTE"
 # Note: gateway-issued assets are prefixed (e.g., XBTSX.ASSET)
 # Default: no restriction. Configure as needed, e.g.:
-# ENABLED_MARKETS = ["XBTSX.NCH/BTS", "XBTSX.USDC/BTS"]
-ENABLED_MARKETS = []
+ENABLED_MARKETS = ["XBTSX.NCH/BTS", "XBTSX.USDC/BTS"]
+#ENABLED_MARKETS = []
 
 # Slippage guard: maximum allowed relative slippage during order placement
 # Example: 0.10 means 10%

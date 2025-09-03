@@ -28,7 +28,6 @@ import octobot_trading.constants as trading_constants
 import octobot_trading.exchanges as exchanges
 import octobot_trading.errors as errors
 import octobot_trading.exchanges.connectors.ccxt.enums as ccxt_enums
-import octobot_trading.exchanges.connectors.ccxt.ccxt_clients_cache as ccxt_clients_cache
 
 
 _EXCHANGE_FEE_TIERS_BY_EXCHANGE_NAME: dict[str, dict] = {}
@@ -46,6 +45,30 @@ class FeeTiers(enum.Enum):
 
 class hollaexConnector(exchanges.CCXTConnector):
 
+    def _create_client(self, force_unauth=False):
+        super()._create_client(force_unauth=force_unauth)
+        self._register_patched_sign()
+
+    def _register_patched_sign(self):
+        # hollaex sign() creates invalid signatures when floats are represented in scientific notation
+        # use strings instead
+        # Note: stop param should not be converted to string as it will then be ignored: leave it as float
+        origin_sign = self.client.sign
+
+        def _patched_sign(path, api='public', method='GET', params={}, headers=None, body=None):
+            if self.client.omit(params, self.client.extract_params(path)):
+                # only fix params when there is a query to generate a signature for
+                # => meaning when self.client.omit leaves something to put in request body
+                fixed_params = {
+                    k: format(decimal.Decimal(str(v)), "f") if (isinstance(v, float) and k != "stop") else v
+                    for k, v in params.items()
+                }
+            else:
+                fixed_params = params
+            return origin_sign(path, api=api, method=method, params=fixed_params, headers=headers, body=body)
+
+        self.client.sign = _patched_sign
+
     async def load_symbol_markets(
         self,
         reload=False,
@@ -54,11 +77,9 @@ class hollaexConnector(exchanges.CCXTConnector):
         await super().load_symbol_markets(reload=reload, market_filter=market_filter)
         # also refresh fee tiers when necessary
         if self.exchange_manager.exchange_name not in _REFRESHED_EXCHANGE_FEE_TIERS_BY_EXCHANGE_NAME:
-            # always update fees cache using all markets to avoid market filter side effects from the current client
-            all_markets = ccxt_clients_cache.get_exchange_parsed_markets(ccxt_clients_cache.get_client_key(self.client))
-            await self._refresh_exchange_fee_tiers(all_markets)
+            await self._refresh_exchange_fee_tiers()
 
-    async def _refresh_exchange_fee_tiers(self, all_markets: list[dict]):
+    async def _refresh_exchange_fee_tiers(self):
         self.logger.info(f"Refreshing {self.exchange_manager.exchange_name} fee tiers")
         response = await self.client.publicGetTiers()
         # similar to ccxt's fetch_trading_fees except that we parse all tiers
@@ -70,26 +91,15 @@ class hollaexConnector(exchanges.CCXTConnector):
             makerFees = self.client.safe_value(fees, 'maker', {})
             takerFees = self.client.safe_value(fees, 'taker', {})
             result: dict = {}
-            for market in all_markets:
-                # get symbol, taker and maker fee for each traded pair identified by its id
-                symbol = market[trading_enums.ExchangeConstantsMarketStatusColumns.SYMBOL.value]
-                maker_string = self.client.safe_string(
-                    makerFees, market[trading_enums.ExchangeConstantsMarketStatusColumns.ID.value]
-                )
-                taker_string = self.client.safe_string(
-                    takerFees, market[trading_enums.ExchangeConstantsMarketStatusColumns.ID.value]
-                )
-                if not (maker_string and taker_string):
-                    self.logger.error(
-                        f"Missing fee details for {symbol} in fetched {self.exchange_manager.exchange_name} fees "
-                        f"(using {market[trading_enums.ExchangeConstantsMarketStatusColumns.ID.value]} as market id)"
-                    )
-                    continue
+            for symbol in self.client.symbols:
+                market = self.client.market(symbol)
+                makerString = self.client.safe_string(makerFees, market['id'])
+                takerString = self.client.safe_string(takerFees, market['id'])
                 result[symbol] = {
                     trading_enums.ExchangeConstantsMarketPropertyColumns.MAKER.value:
-                        self.client.parse_number(ccxt.Precise.string_div(maker_string, '100')),
+                        self.client.parse_number(ccxt.Precise.string_div(makerString, '100')),
                     trading_enums.ExchangeConstantsMarketPropertyColumns.TAKER.value:
-                        self.client.parse_number(ccxt.Precise.string_div(taker_string, '100')),
+                        self.client.parse_number(ccxt.Precise.string_div(takerString, '100')),
                     trading_enums.ExchangeConstantsMarketPropertyColumns.FEE_SIDE.value: market.get(
                         trading_enums.ExchangeConstantsMarketPropertyColumns.FEE_SIDE.value, DEFAULT_FEE_SIDE
                     )
@@ -107,11 +117,7 @@ class hollaexConnector(exchanges.CCXTConnector):
             tier: next(iter(fees.values())) if fees else None
             for tier, fees in fees_by_tier.items()
         }
-        fee_pairs = list(fees_by_tier[next(iter(fees_by_tier))]) if fees_by_tier else []
-        self.logger.info(
-            f"Refreshed {exchange_name} fee tiers. Sample: {sample}. {len(sample)} tiers: {list(sample)} "
-            f"over {len(fee_pairs)} pairs: {fee_pairs}."
-        )
+        self.logger.info(f"Refreshed {exchange_name} fee tiers: {sample}")
 
     @classmethod
     def simulator_connector_calculate_fees_factory(cls, exchange_name: str, tiers: FeeTiers):
@@ -234,17 +240,6 @@ class hollaexConnector(exchanges.CCXTConnector):
         }
 
     @classmethod
-    def _get_default_fee_symbol(cls, exchange: str):
-        try:
-            exchange_fees = _EXCHANGE_FEE_TIERS_BY_EXCHANGE_NAME[exchange]
-            first_fee_tier = next(iter(exchange_fees.values()))
-            return next(iter(first_fee_tier))
-        except (StopIteration, KeyError) as err:
-            raise errors.MissingFeeDetailsError(
-                f"No available {exchange} fee details {err} ({err.__class__.__name__})"
-            ) from err
-
-    @classmethod
     def _get_fetched_fees(cls, exchange: str, tier_to_use: FeeTiers, symbol: str):
         try:
             exchange_fees = _EXCHANGE_FEE_TIERS_BY_EXCHANGE_NAME[exchange]
@@ -253,18 +248,9 @@ class hollaexConnector(exchanges.CCXTConnector):
         try:
             return exchange_fees[tier_to_use.value][symbol]
         except KeyError as err:
-            if symbol not in exchange_fees[FeeTiers.BASIC.value]:
-                default_fee_symbol = cls._get_default_fee_symbol(exchange)
-                if symbol == default_fee_symbol:
-                    raise errors.MissingFeeDetailsError(
-                        f"No available {exchange} {tier_to_use.name} {symbol} fee details"
-                    ) from err
-                logging.get_logger(cls.__name__).error(
-                    f"No {symbol} fee tier info on {exchange}: using {default_fee_symbol} fees as default value"
-                )
-                return cls._get_fetched_fees(exchange, tier_to_use, default_fee_symbol)
-            if tier_to_use.value not in exchange_fees and FeeTiers.BASIC.value in tier_to_use.value:
-                # symbol is in exchange_fees[FeeTiers.BASIC.value] or previous condition would have triggered
+            if tier_to_use.value not in exchange_fees and (
+                FeeTiers.BASIC.value in tier_to_use.value and symbol in exchange_fees[FeeTiers.BASIC.value]
+            ):
                 logging.get_logger(cls.__name__).info(
                     f"Falling back on {FeeTiers.BASIC.name} fee tier for {exchange}: no {tier_to_use.name} value"
                 )
@@ -311,7 +297,7 @@ class hollaex(exchanges.RestExchange):
         trading_enums.ExchangeTypes.SPOT.value: {
             # order that should be self-managed by OctoBot
             trading_enums.ExchangeSupportedElements.UNSUPPORTED_ORDERS.value: [
-                trading_enums.TraderOrderType.STOP_LOSS,    # broken since ccxt 4.5.0: stop param is ignored by exchange because it's sent as a string instead of float. Converting it to flaat fails the signature
+                # trading_enums.TraderOrderType.STOP_LOSS,
                 trading_enums.TraderOrderType.STOP_LOSS_LIMIT,
                 trading_enums.TraderOrderType.TAKE_PROFIT,
                 trading_enums.TraderOrderType.TAKE_PROFIT_LIMIT,
@@ -405,13 +391,26 @@ class hollaex(exchanges.RestExchange):
         )
 
     def get_max_orders_count(self, symbol: str, order_type: trading_enums.TraderOrderType) -> int:
-        #  (30/06/2025: Error 1010 - You are only allowed to have maximum 50 active orders per market)
-        return 50
+        #  (05/06/2025)
+        # hollaex {"message":"Error 1010 - You are only allowed to have maximum 25 active orders per market."}
+        return 25
 
     async def get_account_id(self, **kwargs: dict) -> str:
         with self.connector.error_describer():
             user_info = await self.connector.client.private_get_user()
             return user_info["id"]
+
+    async def get_symbol_prices(self, symbol, time_frame, limit: int = None, **kwargs: dict):
+        # ohlcv without limit is not supported, replaced by a default max limit
+        if limit is None:
+            limit = self.DEFAULT_MAX_LIMIT
+        if "since" not in kwargs:
+            # temporary fix to prevent hollaex from fetching outdates candles
+            # remove once hollaex ccxt fetch_ohlcv stop hard coding defaultSpan = 2592000  # 30 days
+            tf_seconds = commons_enums.TimeFramesMinutes[time_frame] * commons_constants.MINUTE_TO_SECONDS
+            kwargs["since"] = (self.get_exchange_current_time() - tf_seconds * limit) \
+                * commons_constants.MSECONDS_TO_SECONDS
+        return await super().get_symbol_prices(symbol, time_frame, limit=limit, **kwargs)
 
     async def get_closed_orders(self, symbol: str = None, since: int = None,
                                 limit: int = None, **kwargs: dict) -> list:
@@ -440,8 +439,15 @@ class HollaexCCXTAdapter(exchanges.CCXTAdapter):
             #     order_type = trading_enums.TradeOrderType.STOP_LOSS.value
             fixed[trading_enums.ExchangeConstantsOrderColumns.TYPE.value] = order_type
 
-        # fees are usually not in order, but if they are, fix them as ccxt is not parsing them
         self._fix_fees(raw_order_info, fixed)
+        return fixed
+
+    def fix_trades(self, raw, **kwargs):
+        fixed = super().fix_trades(raw, **kwargs)
+        # CCXT standard trades fixing logic
+        for trade in fixed:
+            info = trade.get(ccxt_enums.ExchangeOrderCCXTColumns.INFO.value, {})
+            self._fix_fees(info, trade)
         return fixed
 
     def _fix_fees(self, info, fixed):

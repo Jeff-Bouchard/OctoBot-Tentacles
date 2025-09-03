@@ -84,8 +84,6 @@ class Binance(exchanges.RestExchange):
     EXCHANGE_ACCOUNT_TRADED_SYMBOL_PERMISSION_ERRORS: typing.List[typing.Iterable[str]] = [
         # Binance ex: InvalidOrder binance {"code":-2010,"msg":"This symbol is not permitted for this account."}
         ("symbol", "not permitted", "for this account"),
-        # ccxt.base.errors.InvalidOrder: binance {"code":-2010,"msg":"Symbol not whitelisted for API key."}
-        ("symbol", "not whitelisted"),
     ]
     # text content of errors due to a closed position on the exchange. Relevant for reduce-only orders
     EXCHANGE_CLOSED_POSITION_ERRORS: typing.List[typing.Iterable[str]] = [
@@ -100,11 +98,9 @@ class Binance(exchanges.RestExchange):
     EXCHANGE_ORDER_UNCANCELLABLE_ERRORS: typing.List[typing.Iterable[str]] = [
         ('Unknown order sent', )
     ]
-    # set when the exchange can allow users to pay fees in a custom currency (ex: BNB on binance)
-    LOCAL_FEES_CURRENCIES: typing.List[str] = ["BNB"]
 
     # Name of the price param to give ccxt to edit a stop loss
-    STOP_LOSS_EDIT_PRICE_PARAM = ccxt_enums.ExchangeOrderCCXTUnifiedParams.STOP_PRICE.value
+    STOP_LOSS_EDIT_PRICE_PARAM = ccxt_enums.ExchangeOrderCCXTUnifiedParams.STOP_LOSS.value
 
     BUY_STR = "BUY"
     SELL_STR = "SELL"
@@ -133,7 +129,8 @@ class Binance(exchanges.RestExchange):
         if self.exchange_manager.is_future:
             # replace not supported in futures stop orders
             return not is_stop
-        return True
+        # waiting for update to ccxt 4.4.87
+        return not is_stop
 
     async def get_account_id(self, **kwargs: dict) -> str:
         try:

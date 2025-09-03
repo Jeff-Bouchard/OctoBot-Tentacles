@@ -89,8 +89,6 @@ import octobot_trading.personal_data as trading_personal_data
 
 class Okx(exchanges.RestExchange):
     DESCRIPTION = ""
-    # set True when even loading markets can make auth calls when creds are set
-    CAN_MAKE_AUTHENTICATED_REQUESTS_WHEN_LOADING_MARKETS = True
 
     # text content of errors due to orders not found errors
     EXCHANGE_PERMISSION_ERRORS: typing.List[typing.Iterable[str]] = [
@@ -108,11 +106,6 @@ class Okx(exchanges.RestExchange):
     EXCHANGE_AUTHENTICATION_ERRORS: typing.List[typing.Iterable[str]] = [
         # 'okx {"msg":"API key doesn't exist","code":"50119"}'
         ("api key doesn't exist",),
-    ]
-    # text content of errors due to unhandled IP white list issues
-    EXCHANGE_IP_WHITELIST_ERRORS: typing.List[typing.Iterable[str]] = [
-        # okx {"msg":"Your IP 1.1.1.1 is not included in your API key's xxxx IP whitelist.","code":"50110"}
-        ("is not included in your", "ip whitelist"),
     ]
 
     FIX_MARKET_STATUS = True
@@ -209,9 +202,9 @@ class Okx(exchanges.RestExchange):
         try:
             with self.connector.error_describer():
                 return accounts[0]["id"]
-        except IndexError as err:
+        except IndexError:
             # should never happen as at least one account should be available
-            raise
+            return None
 
     def get_max_orders_count(self, symbol: str, order_type: trading_enums.TraderOrderType) -> int:
         # unknown (05/06/2025)

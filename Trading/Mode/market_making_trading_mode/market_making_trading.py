@@ -147,7 +147,7 @@ class MarketMakingTradingMode(trading_modes.AbstractTradingMode):
         )
 
     def get_current_state(self) -> (str, float):
-        order = self.producers[0].get_market_making_orders() if self.producers else []
+        order = self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(self.symbol)
         bids = [o for o in order if o.side == trading_enums.TradeOrderSide.SELL]
         asks = [o for o in order if o.side == trading_enums.TradeOrderSide.BUY]
         if len(bids) > len(asks):
@@ -272,7 +272,7 @@ class MarketMakingTradingModeConsumer(trading_modes.AbstractTradingModeConsumer)
 
     async def create_new_orders(self, symbol, final_note, state, **kwargs):
         # use dict default getter: can't afford missing data
-        data = kwargs[self.CREATE_ORDER_DATA_PARAM]
+        data = kwargs["data"]
         order_actions_plan: OrdersUpdatePlan = data[self.ORDER_ACTIONS_PLAN_KEY]
         current_price = data[self.CURRENT_PRICE_KEY]
         symbol_market = data[self.SYMBOL_MARKET_KEY]
@@ -586,16 +586,14 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
             symbol=self.symbol,
             timeout=self.PRICE_FETCHING_TIMEOUT
         )
-        return await self.create_state(current_price, symbol_market, trigger_source, False)
+        return await self.create_state(current_price, symbol_market, trigger_source)
 
-    async def create_state(self, current_price, symbol_market, trigger_source: str, force_full_refresh: bool):
+    async def create_state(self, current_price, symbol_market, trigger_source: str):
         if current_price is not None:
             async with self.trading_mode_trigger(skip_health_check=True):
                 if self.exchange_manager.trader.is_enabled:
                     try:
-                        if await self._handle_market_making_orders(
-                            current_price, symbol_market, trigger_source, force_full_refresh
-                        ):
+                        if await self._handle_market_making_orders(current_price, symbol_market, trigger_source):
                             self.is_first_execution = False
                             self._started_at = self.exchange_manager.exchange.get_exchange_current_time()
                             return True
@@ -619,9 +617,7 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
                         return True
         return False
 
-    async def _handle_market_making_orders(
-        self, current_price, symbol_market, trigger_source: str, force_full_refresh: bool
-    ):
+    async def _handle_market_making_orders(self, current_price, symbol_market, trigger_source: str):
         # 1. get price from external source
         reference_price = await self._get_reference_price()
         if not reference_price:
@@ -646,7 +642,7 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
             f"daily {quote} vol: {octobot_commons.pretty_printer.get_min_string_from_number(daily_quote_volume)} "
             f"[trigger source: {trigger_source}]"
         )
-        open_orders = self.get_market_making_orders()
+        open_orders = self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(self.symbol)
         require_data_refresh = False
         if self.latest_actions_plan is not None and not self.latest_actions_plan.processed.is_set():
             # if previous plan is still processing but being cancelled: skip call (another one is waiting for cancel)
@@ -731,7 +727,7 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
                 )
                 return False
             # update open orders in case it changed after waiting
-            open_orders = self.get_market_making_orders()
+            open_orders = self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(self.symbol)
 
         sorted_orders = self._sort_orders(open_orders)
         available_base, available_quote = self._get_available_funds()
@@ -760,8 +756,6 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
         cancelled_orders = created_orders = []
         missing_all_orders_sides = []
         try:
-            if force_full_refresh:
-                raise order_book_distribution.FullBookRebalanceRequired("Forced full refresh")
             book_orders_after_swaps, cancelled_orders, created_orders = (
                 self._get_swapped_book_orders(
                     sorted_orders, outdated_orders, available_base, available_quote, reference_price,
@@ -1177,20 +1171,13 @@ class MarketMakingTradingModeProducer(trading_modes.AbstractTradingModeProducer)
                 technically_available_base += order.origin_quantity - filled_quantity
         return technically_available_base, technically_available_quote
 
-    def get_market_making_orders(self):
-        return [
-            order
-            for order in self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(
-                symbol=self.symbol
-            )
-            # exclude market and stop orders
-            if isinstance(order, (trading_personal_data.BuyLimitOrder, trading_personal_data.SellLimitOrder))
-        ]
 
     async def _on_reference_price_update(self):
         trigger = False
         if reference_price := await self._get_reference_price():
-            open_orders = self.get_market_making_orders()
+            open_orders = self.exchange_manager.exchange_personal_data.orders_manager.get_open_orders(
+                symbol=self.symbol
+            )
             buy_orders = [
                 order
                 for order in open_orders

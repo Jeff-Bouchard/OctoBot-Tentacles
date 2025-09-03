@@ -17,7 +17,6 @@ import flask
 
 import octobot_commons.authentication as authentication
 import octobot_commons.constants as commons_constants
-import octobot_commons.logging as commons_logging
 import octobot_commons.enums as commons_enums
 import tentacles.Services.Interfaces.web_interface.login as login
 import tentacles.Services.Interfaces.web_interface.models as models
@@ -56,16 +55,9 @@ def register(blueprint):
         authenticator = authentication.Authenticator.instance()
         try:
             logged_in_email = authenticator.get_logged_in_email()
-        except (authentication.AuthenticationRequired, authentication.UnavailableError, authentication.AuthenticationError):
+        except (authentication.AuthenticationRequired, authentication.UnavailableError):
             pass
-        cloud_strategies = []
-        try:
-            cloud_strategies = models.get_cloud_strategies(authenticator)
-        except Exception as err:
-            # don't crash the page if this request fails
-            commons_logging.get_logger("profile_selector").exception(
-                err, True, f"Error when fetching cloud strategies: {err}"
-            )
+        cloud_strategies = models.get_cloud_strategies(authenticator)
         display_intro = flask_util.BrowsingDataProvider.instance().get_and_unset_is_first_display(
             flask_util.BrowsingDataProvider.PROFILE_SELECTOR
         )

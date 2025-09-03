@@ -158,10 +158,8 @@ class RemoteTradingSignalsModeConsumer(trading_modes.AbstractTradingModeConsumer
         self.ROUND_TO_MINIMAL_SIZE_IF_NECESSARY = \
             self.trading_mode.trading_config.get(self.ROUND_TO_MINIMAL_SIZE_IF_NECESSARY_CONFIG_KEY)
 
-    async def internal_callback(
-        self, trading_mode_name, cryptocurrency, symbol, time_frame, final_note, state,
-        data: commons_signals.Signal, dependencies=None
-    ):
+    async def internal_callback(self, trading_mode_name, cryptocurrency, symbol, time_frame, final_note, state,
+                                data: commons_signals.Signal):
         """
         Override not to call self.create_order_if_possible to skip portfolio checks and handle signals directly
         """

@@ -74,17 +74,17 @@ class GPTService(services.AbstractService):
     def __init__(self):
         super().__init__()
         logging.getLogger("openai").setLevel(logging.WARNING)
-        self._env_secret_key: str = os.getenv(services_constants.ENV_OPENAI_SECRET_KEY, None) or None
-        self.model: str = os.getenv(services_constants.ENV_GPT_MODEL, self.DEFAULT_MODEL)
+        self._env_secret_key = os.getenv(services_constants.ENV_OPENAI_SECRET_KEY, None) or None
+        self.model = os.getenv(services_constants.ENV_GPT_MODEL, self.DEFAULT_MODEL)
         self.stored_signals: tree.BaseTree = tree.BaseTree()
-        self.models: list[str] = []
-        self._env_daily_token_limit: int = int(os.getenv(
+        self.models = []
+        self._env_daily_token_limit = int(os.getenv(
             services_constants.ENV_GPT_DAILY_TOKENS_LIMIT,
             self.NO_TOKEN_LIMIT_VALUE)
         )
-        self._daily_tokens_limit: int = self._env_daily_token_limit
-        self.consumed_daily_tokens: int = 1
-        self.last_consumed_token_date: datetime.date = None
+        self._daily_tokens_limit = self._env_daily_token_limit
+        self.consumed_daily_tokens = 1
+        self.last_consumed_token_date = None
 
     @staticmethod
     def create_message(role, content, model: str = None):
@@ -158,10 +158,11 @@ class GPTService(services.AbstractService):
             self._update_token_usage(completions.usage.total_tokens)
             return completions.choices[0].message.content
         except (
-            openai.BadRequestError, openai.UnprocessableEntityError # error in request
+            openai.BadRequestError, # error in request
+            openai.UnprocessableEntityError # error in model (ex: model not found)
         )as err:
             if "does not support 'system' with this model" in str(err):
-                desc = err.message
+                desc = err.body.get("message", str(err))
                 err_message = (
                     f"The \"{model}\" model can't be used with {SYSTEM} prompts. "
                     f"It should be added to NO_SYSTEM_PROMPT_MODELS: {desc}"
@@ -169,12 +170,9 @@ class GPTService(services.AbstractService):
             else:
                 err_message = f"Error when running request with model {model} (invalid request): {err}"
             raise errors.InvalidRequestError(err_message) from err
-        except openai.NotFoundError as err:
-            self.logger.error(f"Model {model} not found: {err}. Available models: {', '.join(self.models)}")
-            self.creation_error_message = str(err)
         except openai.AuthenticationError as err:
             self.logger.error(f"Invalid OpenAI api key: {err}")
-            self.creation_error_message = str(err)
+            self.creation_error_message = err
         except Exception as err:
             raise errors.InvalidRequestError(
                 f"Unexpected error when running request with model {model}: {err}"
@@ -187,7 +185,7 @@ class GPTService(services.AbstractService):
         time_frame: str,
         version: str,
         candle_open_time: float,
-    ) -> str:
+    ):
         try:
             return self.stored_signals.get_node([exchange, symbol, time_frame, version, candle_open_time]).node_value
         except tree.NodeExistsError:
@@ -400,7 +398,7 @@ class GPTService(services.AbstractService):
                     )
         except openai.AuthenticationError as err:
             self.logger.error(f"Invalid OpenAI api key: {err}")
-            self.creation_error_message = str(err)
+            self.creation_error_message = err
         except Exception as err:
             self.logger.exception(err, True, f"Unexpected error when initializing GPT service: {err}")
 

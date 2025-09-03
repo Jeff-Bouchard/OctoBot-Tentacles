@@ -21,7 +21,6 @@ import asyncio
 import decimal
 import copy
 import mock
-import time
 
 import async_channel.util as channel_util
 import octobot_tentacles_manager.api as tentacles_manager_api
@@ -35,10 +34,7 @@ import octobot_trading.exchanges as exchanges
 import octobot_trading.enums as trading_enums
 import octobot_trading.personal_data as trading_personal_data
 import octobot_trading.constants as trading_constants
-import octobot_trading.signals as trading_signals
-import octobot_trading.modes as trading_modes
 import tentacles.Trading.Mode.grid_trading_mode.grid_trading as grid_trading
-import tentacles.Trading.Mode.grid_trading_mode.tests.open_orders_data as open_orders_data
 import tentacles.Trading.Mode.staggered_orders_trading_mode.staggered_orders_trading as staggered_orders_trading
 import tests.test_utils.config as test_utils_config
 import tests.test_utils.memory_check_util as memory_check_util
@@ -480,7 +476,7 @@ async def test_start_after_offline_filled_orders_without_recent_trades():
         # simulate a start without StaggeredOrdersTradingModeProducer.AVAILABLE_FUNDS
         staggered_orders_trading.StaggeredOrdersTradingModeProducer.AVAILABLE_FUNDS.pop(exchange_manager.id, None)
         # clear trades
-        await trading_api.clear_trades_storage_history(exchange_manager)
+        await trading_api.clear_trades_storage_history(exchange_manager)    #todo
         post_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
         assert pre_portfolio < post_portfolio
         assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
@@ -556,7 +552,7 @@ async def test_start_after_offline_filled_orders_with_recent_trades():
         _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 100)
 
 
-async def test_start_after_offline_filled_orders_close_to_price_with_recent_trades_considering_fees():
+async def test_start_after_offline_filled_orders_close_to_price_with_recent_trades():
     symbol = "BTC/USDT"
     async with _get_tools(symbol) as (producer, _, exchange_manager):
         # first start: setup orders
@@ -564,7 +560,6 @@ async def test_start_after_offline_filled_orders_close_to_price_with_recent_trad
         producer.buy_funds = decimal.Decimal("10000")  # 25 buy orders
         producer.flat_spread = decimal.Decimal("200")
         producer.flat_increment = decimal.Decimal("75")
-        producer.ignore_exchange_fees = False
         orders_count = 25 + 25
 
         initial_price = 29247.16
@@ -607,174 +602,6 @@ async def test_start_after_offline_filled_orders_close_to_price_with_recent_trad
         symbol_market = exchange_manager.exchange.get_market_status(symbol, with_fixer=False)
         assert new_order.origin_quantity == \
                trading_personal_data.decimal_adapt_quantity(symbol_market, offline_filled.origin_quantity - fees)
-
-
-async def test_start_after_offline_filled_orders_close_to_price_with_recent_trades_ignoring_fees_with_enough_available_funds():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        # first start: setup orders
-        producer.sell_funds = decimal.Decimal("1")  # 25 sell orders
-        producer.buy_funds = decimal.Decimal("10000")  # 25 buy orders
-        producer.flat_spread = decimal.Decimal("200")
-        producer.flat_increment = decimal.Decimal("75")
-        producer.ignore_exchange_fees = True
-        orders_count = 25 + 25
-
-        initial_price = 29247.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, initial_price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-
-        # offline simulation: orders get filled but not replaced => price got up to 110 and not down to 90, now is 96s
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29147.16')]
-        assert len(offline_filled_orders) == 1
-        offline_filled = offline_filled_orders[0]
-        await _fill_order(offline_filled, exchange_manager, trigger_update_callback=False, producer=producer)
-        # offline_filled is a buy order: now have mode BTC
-        post_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        assert pre_portfolio < post_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - 1
-
-        # back online: restore orders according to current price => create sell missing order
-        price = 29127.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        with _assert_missing_orders_count(producer, len(offline_filled_orders)):
-            await producer._ensure_staggered_orders()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "BTC").available < post_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        _check_created_orders(producer, open_orders, initial_price)
-        new_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29272.16')]
-        assert len(new_orders) == 1
-        new_order = new_orders[0]
-        assert new_order.side is trading_enums.TradeOrderSide.SELL
-        # offline_filled - fees
-        trade = trading_api.get_trade_history(exchange_manager)[0]
-        fees = trade.fee[trading_enums.FeePropertyColumns.COST.value]
-        assert fees > trading_constants.ZERO
-        assert new_order.origin_quantity == offline_filled.origin_quantity  # trading fees exist but are not taken into account
-
-
-async def test_start_after_offline_filled_orders_close_to_price_with_recent_trades_ignoring_fees_without_enough_available_sell_funds():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        # first start: setup orders
-        producer.sell_funds = decimal.Decimal("1")  # 25 sell orders
-        producer.buy_funds = decimal.Decimal("10000")  # 25 buy orders
-        producer.flat_spread = decimal.Decimal("200")
-        producer.flat_increment = decimal.Decimal("75")
-        producer.ignore_exchange_fees = True
-        orders_count = 25 + 25
-
-        initial_price = 29247.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, initial_price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-
-        # offline simulation: orders get filled but not replaced => price got up to 110 and not down to 90, now is 96s
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29147.16')]
-        assert len(offline_filled_orders) == 1
-        offline_filled = offline_filled_orders[0]
-        assert offline_filled.side is trading_enums.TradeOrderSide.BUY
-        await _fill_order(offline_filled, exchange_manager, trigger_update_callback=False, producer=producer)
-        # offline_filled is a buy order: now have mode BTC
-        post_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        assert pre_portfolio < post_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - 1
-        assert offline_filled.origin_quantity == decimal.Decimal("0.00136765")
-        trading_api.get_portfolio_currency(exchange_manager, "BTC").available = decimal.Decimal("0.00116765111111111111111111111") # less than order quantity to simulate fees
-
-        # back online: restore orders according to current price => create missing sell order
-        price = 29127.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        with _assert_missing_orders_count(producer, len(offline_filled_orders)):
-            await producer._ensure_staggered_orders()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "BTC").available < post_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        _check_created_orders(producer, open_orders, initial_price)
-        new_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29272.16')]
-        assert len(new_orders) == 1
-        new_order = new_orders[0]
-        assert new_order.side is trading_enums.TradeOrderSide.SELL
-        # offline_filled - fees
-        trade = trading_api.get_trade_history(exchange_manager)[0]
-        fees = trade.fee[trading_enums.FeePropertyColumns.COST.value]
-        assert fees > trading_constants.ZERO
-        assert new_order.origin_quantity < offline_filled.origin_quantity  # adapted amount to available funds
-        assert new_order.origin_quantity == decimal.Decimal("0.00116765")
-
-
-async def test_start_after_offline_filled_orders_close_to_price_with_recent_trades_ignoring_fees_without_enough_available_buy_funds():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        # first start: setup orders
-        producer.sell_funds = decimal.Decimal("1")  # 25 sell orders
-        producer.buy_funds = decimal.Decimal("10000")  # 25 buy orders
-        producer.flat_spread = decimal.Decimal("200")
-        producer.flat_increment = decimal.Decimal("75")
-        producer.ignore_exchange_fees = True
-        orders_count = 25 + 25
-
-        initial_price = 29247.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, initial_price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-
-        # offline simulation: orders get filled but not replaced => price got up to 110 and not down to 90, now is 96s
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29347.16')]
-        assert len(offline_filled_orders) == 1
-        offline_filled = offline_filled_orders[0]
-        assert offline_filled.side is trading_enums.TradeOrderSide.SELL
-        await _fill_order(offline_filled, exchange_manager, trigger_update_callback=False, producer=producer)
-        offline_filled_cost = offline_filled.total_cost
-        assert offline_filled_cost == decimal.Decimal("1173.8864")
-        # offline_filled is a buy order: now have mode BTC
-        USDT_assets = trading_api.get_portfolio_currency(exchange_manager, "USDT")
-        USDT_assets.available = decimal.Decimal("666") # less than order quantity to simulate fees
-        post_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        assert pre_portfolio < post_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - 1
-        assert offline_filled.origin_quantity == decimal.Decimal("0.04")
-
-        # back online: restore orders according to current price => create missing buy order
-        price = 29227.16
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        with _assert_missing_orders_count(producer, len(offline_filled_orders)):
-            await producer._ensure_staggered_orders()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "BTC").available < post_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        _check_created_orders(producer, open_orders, initial_price)
-        new_orders = [o for o in open_orders if o.origin_price == decimal.Decimal('29222.16')]
-        assert len(new_orders) == 1
-        new_order = new_orders[0]
-        assert new_order.side is trading_enums.TradeOrderSide.BUY
-        # offline_filled - fees
-        trade = trading_api.get_trade_history(exchange_manager)[0]
-        fees = trade.fee[trading_enums.FeePropertyColumns.COST.value]
-        assert fees > trading_constants.ZERO
-        assert new_order.origin_quantity < offline_filled.origin_quantity  # adapted amount to available funds
-        assert new_order.origin_quantity == decimal.Decimal("0.02279092")
-        assert new_order.total_cost == decimal.Decimal("665.9999107872")    # < 666
 
 
 async def test_start_after_offline_full_sell_side_filled_orders_with_recent_trades():
@@ -1029,256 +856,6 @@ async def test_start_after_offline_x_filled_and_price_back_should_sell_to_recrea
         _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 200)
 
 
-async def test_start_after_offline_1_filled_and_price_back_should_NOT_sell_to_recreate_buy_but_just_create_a_sell_order():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        orders_count = 25 + 25
-
-        price = decimal.Decimal(200)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        pre_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-
-        # offline simulation: 1 buy order get filled but not replaced => price moved to 194 (first buy order is at 195)
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.BUY and o.origin_price >= decimal.Decimal("194")
-        ]
-        assert len(offline_filled) == 1
-        assert offline_filled[0].origin_price == decimal.Decimal(195)
-        for order in offline_filled:
-            await _fill_order(order, exchange_manager, trigger_update_callback=False, producer=producer)
-        post_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        post_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        # buy orders filled: BTC increased
-        assert pre_btc_portfolio < post_btc_portfolio
-        # no sell order filled, available USDT is constant
-        assert pre_usdt_portfolio == post_usdt_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
-
-        # back online: restore orders according to current price
-        # simulate current price as back to 198: do not market sell BTC but create a new sell order instead 
-        price = decimal.Decimal(198)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        # lower sell order is at 205
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(205)
-        with _assert_missing_orders_count(producer, len(offline_filled)):
-            with mock.patch.object(producer, "_pack_and_balance_missing_orders", mock.AsyncMock()) as _pack_and_balance_missing_orders_mock:
-                await producer._ensure_staggered_orders()
-                # does not create missing mirror orders market orders
-                _pack_and_balance_missing_orders_mock.assert_not_called()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "BTC").available <= post_btc_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        # created 1 additional sell order
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL]) == 25 + 1
-        # created a new sell order at 200
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(200)
-        # no created buy order
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY]) == 25 - 1
-        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 200)
-
-
-async def test_start_after_offline_1_filled_and_price_back_should_NOT_sell_to_recreate_buy_but_just_create_a_sell_order_with_surrounding_partially_filled_orders():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        orders_count = 25 + 25
-
-        price = decimal.Decimal(200)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        pre_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-
-        # offline simulation: 1 buy order get filled but not replaced => price moved to 194 (first buy order is at 195)
-        # and 2nd buy order get partially filled
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.BUY and o.origin_price >= decimal.Decimal("194")
-        ]
-        assert len(offline_filled) == 1
-        assert offline_filled[0].origin_price == decimal.Decimal(195)
-        for order in offline_filled:
-            await _fill_order(order, exchange_manager, trigger_update_callback=False, producer=producer)
-        post_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        post_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        # buy orders filled: BTC increased
-        assert pre_btc_portfolio < post_btc_portfolio
-        # no sell order filled, available USDT is constant
-        assert pre_usdt_portfolio == post_usdt_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
-
-        partially_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.BUY and o.origin_price == decimal.Decimal("190") or o.origin_price == decimal.Decimal("205")
-        ]
-        assert len(partially_filled) == 2
-        for partially_filled_order in partially_filled:
-            partially_filled_order.filled_quantity = partially_filled_order.origin_quantity / decimal.Decimal(2)
-            partially_filled_order.filled_price = partially_filled_order.origin_price
-            # add trade corresponding to the partial order fill
-            assert await exchange_manager.exchange_personal_data.handle_trade_instance_update(
-                exchange_manager.trader.convert_order_to_trade(partially_filled_order)
-            ) is True
-            trade = exchange_manager.exchange_personal_data.trades_manager.get_trade_from_order_id(partially_filled_order.order_id)
-            assert trade.executed_quantity == partially_filled_order.filled_quantity
-            assert trade.executed_price == partially_filled_order.origin_price
-            trade.executed_time = time.time()  # these trades are the most recent ones
-
-        # back online: restore orders according to current price
-        # simulate current price as back to 198: do not market sell BTC but create a new sell order instead 
-        price = decimal.Decimal(198)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        # lower sell order is at 205
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(205)
-        with _assert_missing_orders_count(producer, len(offline_filled)):
-            with mock.patch.object(producer, "_pack_and_balance_missing_orders", mock.AsyncMock()) as _pack_and_balance_missing_orders_mock:
-                await producer._ensure_staggered_orders()
-                # does not create missing mirror orders market orders
-                _pack_and_balance_missing_orders_mock.assert_not_called()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "BTC").available <= post_btc_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        # created 1 additional sell order
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL]) == 25 + 1
-        # created a new sell order at 200
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(200)
-        # no created buy order
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY]) == 25 - 1
-        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 200)
-
-
-async def test_start_after_offline_1_filled_and_price_back_should_NOT_buy_to_recreate_sell_but_just_create_a_buy_order():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        orders_count = 25 + 25
-
-        price = decimal.Decimal(200)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        pre_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-
-        # offline simulation: 1 sell order get filled but not replaced => price moved to 206 (first sell order is at 205)
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.SELL and o.origin_price <= decimal.Decimal("206")
-        ]
-        assert len(offline_filled) == 1
-        assert offline_filled[0].origin_price == decimal.Decimal(205)
-        for order in offline_filled:
-            await _fill_order(order, exchange_manager, trigger_update_callback=False, producer=producer)
-        post_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        post_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        # sell orders filled: BTC is constant
-        assert pre_btc_portfolio == post_btc_portfolio
-        # no sell order filled, USDT increased
-        assert pre_usdt_portfolio < post_usdt_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
-
-        # back online: restore orders according to current price
-        # simulate current price as back to 202: do not market sell BTC but create a new buy order instead 
-        price = decimal.Decimal(202)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        # higest buy order is at 195
-        assert max(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY) == decimal.Decimal(195)
-        with _assert_missing_orders_count(producer, len(offline_filled)):
-            with mock.patch.object(producer, "_pack_and_balance_missing_orders", mock.AsyncMock()) as _pack_and_balance_missing_orders_mock:
-                await producer._ensure_staggered_orders()
-                # does not create missing mirror orders market orders
-                _pack_and_balance_missing_orders_mock.assert_not_called()
-
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available <= post_usdt_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        # no created sell order
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL]) == 25 - 1
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(210)
-        # created a new buy order at 200
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY]) == 25 + 1
-        assert max(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY) == decimal.Decimal(200)
-        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 200)
-
-
-async def test_start_after_offline_2_filled_and_price_back_should_buy_to_recreate_sell():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        orders_count = 25 + 25
-
-        price = decimal.Decimal(200)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        pre_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-
-        # offline simulation: 2 sell orders get filled but not replaced => price moved to 211 (first sell order is at 211)
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.SELL and o.origin_price <= decimal.Decimal("211")
-        ]
-        assert len(offline_filled) == 2
-        assert offline_filled[0].origin_price == decimal.Decimal(205)
-        assert offline_filled[1].origin_price == decimal.Decimal(210)
-        for order in offline_filled:
-            await _fill_order(order, exchange_manager, trigger_update_callback=False, producer=producer)
-        post_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        post_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        # sell orders filled: BTC is constant
-        assert pre_btc_portfolio == post_btc_portfolio
-        # no sell order filled, USDT increased
-        assert pre_usdt_portfolio < post_usdt_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
-
-        # back online: restore orders according to current price
-        # simulate current price as back to 202: do not market sell BTC but create a new buy order instead 
-        price = decimal.Decimal(202)
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        # higest buy order is at 195
-        assert max(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY) == decimal.Decimal(195)
-        with _assert_missing_orders_count(producer, len(offline_filled)):
-            with mock.patch.object(producer, "_pack_and_balance_missing_orders", mock.AsyncMock(wraps=producer._pack_and_balance_missing_orders)) as _pack_and_balance_missing_orders_mock:
-                await producer._ensure_staggered_orders()
-                # DOES create a missing mirror orders market order to compensate for the missing sell order
-                _pack_and_balance_missing_orders_mock.assert_called_once()
-
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available <= post_usdt_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        # recreated 1 sell order at 210
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL]) == 25 - 1
-        assert min(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL) == decimal.Decimal(210)
-        # created a new buy order at 200
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY]) == 25 + 1
-        assert max(order.origin_price for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY) == decimal.Decimal(200)
-        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 200)
-
-
 async def test_start_after_offline_x_filled_and_price_back_should_buy_to_recreate_sell():
     symbol = "BTC/USDT"
     async with _get_tools(symbol) as (producer, _, exchange_manager):
@@ -1348,6 +925,7 @@ async def test_start_after_offline_x_filled_and_missing_should_recreate_1_sell()
         producer.sell_volume_per_order = producer.buy_volume_per_order = False
         producer.starting_price = 0
         producer.use_existing_orders_only = False
+        producer.use_fixed_volume_for_mirror_orders = False
 
         orders_count = producer.buy_orders_count + producer.sell_orders_count
 
@@ -1425,6 +1003,7 @@ async def test_start_after_offline_x_filled_and_missing_should_recreate_5_sell_o
         producer.sell_volume_per_order = producer.buy_volume_per_order = False
         producer.starting_price = 0
         producer.use_existing_orders_only = False
+        producer.use_fixed_volume_for_mirror_orders = False
 
         orders_count = producer.buy_orders_count + producer.sell_orders_count
 
@@ -1508,6 +1087,7 @@ async def test_start_after_offline_x_filled_and_missing_should_recreate_5_buy_or
         producer.sell_volume_per_order = producer.buy_volume_per_order = False
         producer.starting_price = 0
         producer.use_existing_orders_only = False
+        producer.use_fixed_volume_for_mirror_orders = False
 
         orders_count = producer.buy_orders_count + producer.sell_orders_count
 
@@ -1570,7 +1150,7 @@ async def test_start_after_offline_x_filled_and_missing_should_recreate_5_buy_or
         _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), initial_price)
 
 
-async def test_start_after_offline_1_filled_should_create_buy_considering_fees():
+async def test_start_after_offline_1_filled_should_create_buy():
     symbol = "BTC/USDT"
     async with _get_tools(symbol) as (producer, _, exchange_manager):
         price = decimal.Decimal("26616.7")
@@ -1578,64 +1158,6 @@ async def test_start_after_offline_1_filled_should_create_buy_considering_fees()
         producer.flat_increment = decimal.Decimal(125)
         producer.buy_orders_count = 30
         producer.sell_orders_count = 30
-        producer.ignore_exchange_fees = False
-
-        orders_count = producer.buy_orders_count + producer.sell_orders_count
-
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        await producer._ensure_staggered_orders()
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        original_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
-        assert len(original_orders) == orders_count
-        pre_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        pre_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-
-        # offline simulation: orders get filled but not replaced => price moved to 26756.2
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        offline_filled = [
-            o
-            for o in open_orders
-            if o.side == trading_enums.TradeOrderSide.SELL and o.origin_price <= decimal.Decimal("26756.2")
-        ]
-        # this is 1 order
-        assert len(offline_filled) == 1
-        assert offline_filled[0].origin_price == decimal.Decimal("26754.2")
-        for order in offline_filled:
-            await _fill_order(order, exchange_manager, trigger_update_callback=False, producer=producer)
-        post_btc_portfolio = trading_api.get_portfolio_currency(exchange_manager, "BTC").available
-        post_usdt_portfolio = trading_api.get_portfolio_currency(exchange_manager, "USDT").available
-        # buy orders filled: available BTC is constant
-        assert pre_btc_portfolio == post_btc_portfolio
-        # no sell order filled, available USDT increased
-        assert pre_usdt_portfolio <= post_usdt_portfolio
-        assert len(trading_api.get_open_orders(exchange_manager)) == orders_count - len(offline_filled)
-
-        # back online: restore orders according to current price
-        # simulate current price at 26753.8
-        price = decimal.Decimal("26753.8")
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        with _assert_missing_orders_count(producer, 1):
-            await producer._ensure_staggered_orders()
-        # restored orders
-        await asyncio.create_task(_check_open_orders_count(exchange_manager, orders_count))
-        assert 0 <= trading_api.get_portfolio_currency(exchange_manager, "USDT").available <= post_usdt_portfolio
-        open_orders = trading_api.get_open_orders(exchange_manager)
-        # 1 sell order is filled
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.SELL]) == 30 - 1
-        # 1 buy order is added
-        assert len([order for order in open_orders if order.side is trading_enums.TradeOrderSide.BUY]) == 30 + 1
-        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), decimal.Decimal("26616.7"))
-
-
-async def test_start_after_offline_1_filled_should_create_buy_ignoring_fees():
-    symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        price = decimal.Decimal("26616.7")
-        producer.flat_spread = decimal.Decimal(275)
-        producer.flat_increment = decimal.Decimal(125)
-        producer.buy_orders_count = 30
-        producer.sell_orders_count = 30
-        producer.ignore_exchange_fees = True
 
         orders_count = producer.buy_orders_count + producer.sell_orders_count
 
@@ -1732,7 +1254,7 @@ async def test_start_after_offline_1_filled_should_create_sell():
 
 async def test_start_after_offline_with_added_funds_increasing_orders_count():
     symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, consumer, exchange_manager):
+    async with _get_tools(symbol) as (producer, _, exchange_manager):
         producer.sell_funds = decimal.Decimal("0.00005")  # 4 sell orders
         producer.buy_funds = decimal.Decimal("0.005")  # 4 buy orders
 
@@ -1762,29 +1284,10 @@ async def test_start_after_offline_with_added_funds_increasing_orders_count():
         # 2. offline simulation: funds are added (here config changed)
         producer.sell_funds = decimal.Decimal("0.0001")  # 9 sell orders
         # triggering orders will cancel all open orders and recreate grid orders with new funds
-        with mock.patch.object(
-            consumer, "create_order", mock.AsyncMock(wraps=consumer.create_order)
-        ) as create_order_mock, mock.patch.object(
-            producer.trading_mode, "cancel_order", mock.AsyncMock(wraps=producer.trading_mode.cancel_order)
-        ) as cancel_order_mock:
-            await producer._ensure_staggered_orders()
-            # one more buy order
-            assert cancel_order_mock.call_count == orders_count # all orders are cancelled
-            assert all(
-                call.kwargs["dependencies"] is None
-                for call in cancel_order_mock.mock_calls
-            )
-            new_orders_count = orders_count + 5
-            await asyncio.create_task(_check_open_orders_count(exchange_manager, new_orders_count))
-            assert create_order_mock.call_count == new_orders_count
-            cancelled_orders_dependencies = trading_signals.get_orders_dependencies(
-                [call.args[0] for call in cancel_order_mock.mock_calls]
-            )
-            # cancel orders dependencies are forwarded as dependencies for newly created orders
-            assert all(
-                call.args[3] == cancelled_orders_dependencies
-                for call in create_order_mock.mock_calls
-            )
+        await producer._ensure_staggered_orders()
+        # one more buy order
+        new_orders_count = orders_count + 5
+        await asyncio.create_task(_check_open_orders_count(exchange_manager, new_orders_count))
         new_orders = copy.copy(trading_api.get_open_orders(exchange_manager))
         assert len(new_orders) == new_orders_count
         # replaced orders
@@ -2096,47 +1599,9 @@ async def test_start_after_offline_only_sell_orders_remaining():
         assert sorted(new_orders, key=lambda x: x.origin_price)[-1] is sorted(open_orders, key=lambda x: x.origin_price)[-1]
 
 
-async def test_start_after_offline_no_missing_order():
-    symbol = "SOL/USDT"
-    async with _get_tools(symbol) as (producer, _, exchange_manager):
-        producer.buy_funds = trading_constants.ZERO
-        producer.sell_funds = trading_constants.ZERO
-        producer.flat_spread = decimal.Decimal('0.714792')
-        producer.flat_increment = decimal.Decimal('0.34310016')
-        producer.buy_orders_count = 25
-        producer.sell_orders_count = 25
-        producer.enable_trailing_up = True
-        producer.enable_trailing_down = False
-        producer.use_existing_orders_only = False
-        producer.funds_redispatch_interval = 24
-        producer.use_existing_orders_only = False
-        producer.ignore_exchange_fees = True
-
-        pre_portfolio_usdt = trading_api.get_portfolio_currency(exchange_manager, "USDT")
-        pre_portfolio_sol = trading_api.get_portfolio_currency(exchange_manager, "SOL")
-        pre_portfolio_usdt.total = decimal.Decimal("59.25023354")
-        pre_portfolio_usdt.available = pre_portfolio_usdt.total
-        pre_portfolio_sol.total = decimal.Decimal("0.397005")
-        pre_portfolio_sol.available = pre_portfolio_sol.total
-
-        price = 148.736
-        trading_api.force_set_mark_price(exchange_manager, producer.symbol, price)
-        open_orders = await open_orders_data.get_full_sol_usdt_open_orders(exchange_manager)
-        for order in open_orders:
-            await order.initialize()
-            await exchange_manager.exchange_personal_data.orders_manager.upsert_order_instance(order)
-
-        with mock.patch.object(producer, "_create_not_virtual_orders", mock.Mock()) as _create_not_virtual_orders_mock:
-
-            await producer._ensure_staggered_orders()
-            assert _create_not_virtual_orders_mock.call_count == 1
-            assert _create_not_virtual_orders_mock.mock_calls[0].args[0] == []
-            # should not find any missing order and should not trail
-
-
 async def test_trailing_up():
     symbol = "BTC/USDT"
-    async with _get_tools(symbol) as (producer, consumer, exchange_manager):
+    async with _get_tools(symbol) as (producer, _, exchange_manager):
         # first start: setup orders
         producer.sell_funds = decimal.Decimal("1")  # 25 sell orders
         producer.buy_funds = decimal.Decimal("1")  # 19 buy orders
@@ -2169,31 +1634,9 @@ async def test_trailing_up():
         new_price = decimal.Decimal(250)
         trading_api.force_set_mark_price(exchange_manager, producer.symbol, new_price)
         # will trail up
-        with mock.patch.object(
-            consumer, "create_order", mock.AsyncMock(wraps=consumer.create_order)
-        ) as create_order_mock, mock.patch.object(
-            producer.trading_mode, "cancel_order", mock.AsyncMock(wraps=producer.trading_mode.cancel_order)
-        ) as cancel_order_mock, mock.patch.object(
-            trading_modes, "convert_asset_to_target_asset", mock.AsyncMock(wraps=trading_modes.convert_asset_to_target_asset)
-        ) as convert_asset_to_target_asset_mock:
-            await producer._ensure_staggered_orders()
-            assert cancel_order_mock.call_count == 19 # all buy orders are cancelled
-            assert all(
-                call.kwargs["dependencies"] is None
-                for call in cancel_order_mock.mock_calls
-            )
-            cancelled_orders_dependencies = trading_signals.get_orders_dependencies(
-                [call.args[0] for call in cancel_order_mock.mock_calls]
-            )
-            convert_asset_to_target_asset_mock.assert_not_called()
-            await asyncio.create_task(_check_open_orders_count(exchange_manager, producer.operational_depth))
-            _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 250)
-            assert create_order_mock.call_count == producer.operational_depth
-            # no conversion, will use cancel order dependencies
-            assert all(
-                call.args[3] == cancelled_orders_dependencies
-                for call in create_order_mock.mock_calls
-            )
+        await producer._ensure_staggered_orders()
+        await asyncio.create_task(_check_open_orders_count(exchange_manager, producer.operational_depth))
+        _check_created_orders(producer, trading_api.get_open_orders(exchange_manager), 250)
 
         # B. orders get filled but not enough to trigger a trailing reset
         # offline simulation: orders get filled but not replaced => price got up to more than the max price

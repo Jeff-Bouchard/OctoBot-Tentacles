@@ -25,7 +25,6 @@ import octobot_trading.exchanges as exchanges
 import octobot_trading.exchanges.connectors.ccxt.enums as ccxt_enums
 import octobot_trading.exchanges.connectors.ccxt.constants as ccxt_constants
 import octobot_trading.exchanges.connectors.ccxt.ccxt_connector as ccxt_connector
-import octobot_trading.exchanges.connectors.ccxt.ccxt_client_util as ccxt_client_util
 import octobot_trading.personal_data.orders.order_util as order_util
 import octobot_commons.enums as commons_enums
 import octobot_commons.constants as commons_constants
@@ -38,20 +37,10 @@ ALIASED_SYMBOLS = set()
 
 # hard code Coinbase base tier fees as long as there is no way to fetch it
 # https://www.coinbase.com/advanced-fees
-INTRO_1_TAKER_MAKER_FEES = (0.012, 0.006) # Intro 1: 1.2%, 0.6%: <1k monthly trading volume Coinbase taker fees tier
-INTRO_2_TAKER_MAKER_FEES = (0.0075, 0.0035) # Intro 2: 0.75%, 0.35%: >1k & <10k monthly trading volume Coinbase taker fees tier
-
-
-# simulate live fees considering the INTRO_1_TAKER_MAKER_FEES as the base tier fees to avoid 
-# fees issues for intro 1 tier users
-DEFAULT_LIVE_TAKER_FEE_VALUE = INTRO_1_TAKER_MAKER_FEES[0]
-DEFAULT_LIVE_MAKER_FEE_VALUE = INTRO_1_TAKER_MAKER_FEES[1]
-# compute backtesting fees considering the INTRO_2_TAKER_MAKER_FEES as the base tier fees
-DEFAULT_BACKTESTING_TAKER_FEE_VALUE = INTRO_2_TAKER_MAKER_FEES[0]
-DEFAULT_BACKTESTING_MAKER_FEE_VALUE = INTRO_2_TAKER_MAKER_FEES[1]
+DEFAULT_TAKER_FEE_VALUE = 0.012  # 1.2%: base Coinbase taker fees tier
+DEFAULT_MAKER_FEE_VALUE = 0.006  # 0.6%: base Coinbase maker fees tier
 # disabled by default
 FORCE_COINBASE_BASE_FEES = os_util.parse_boolean_environment_var("FORCE_COINBASE_BASE_FEES", "false")
-_MAX_CURSOR_ITERATIONS = 10
 
 
 def _refresh_alias_symbols(client):
@@ -116,38 +105,13 @@ class CoinbaseConnector(ccxt_connector.CCXTConnector):
     @_coinbase_retrier
     async def _load_markets(self, client, reload: bool):
         # override for retrier and populate ALIASED_SYMBOLS
-        try:
-            await client.load_markets(reload=reload)
-        except Exception as err:
-            # ensure this is not a proxy error, raise dedicated error if it is
-            if proxy_error := ccxt_client_util.get_proxy_error_if_any(self, err):
-                raise ccxt_client_util.get_proxy_error_class(proxy_error)(proxy_error) from err
-            raise
+        await client.load_markets(reload=reload)
         # only call _refresh_alias_symbols from here as markets just got reloaded,
         # no market can be missing unlike when using cached markets
         _refresh_alias_symbols(client)
         if FORCE_COINBASE_BASE_FEES:
             # always use base fee tiers inside OctoBot to avoid issues with coinbase high fees
             self._apply_base_fee_tiers()
-
-    @classmethod
-    def register_simulator_connector_fee_methods(
-        cls, exchange_name: str, simulator_connector: exchanges.ExchangeSimulatorConnector
-    ):
-        if FORCE_COINBASE_BASE_FEES:
-            # only called in backtesting
-            # overrides exchange simulator connector get_fees to use backtesting fees
-            simulator_connector.get_fees = cls.simulator_connector_get_fees
-
-    @classmethod
-    def simulator_connector_get_fees(cls, symbol: str):
-        # same signature as ExchangeSimulatorConnector.get_fees
-        # force selecetd fee tier in backtesting
-        return {
-            trading_enums.ExchangeConstantsMarketPropertyColumns.TAKER.value: DEFAULT_BACKTESTING_TAKER_FEE_VALUE,
-            trading_enums.ExchangeConstantsMarketPropertyColumns.MAKER.value: DEFAULT_BACKTESTING_MAKER_FEE_VALUE,
-            trading_enums.ExchangeConstantsMarketPropertyColumns.FEE.value: trading_constants.CONFIG_DEFAULT_SIMULATOR_FEES
-        }
 
     def _apply_base_fee_tiers(self):
         taker_fee, maker_fee = self._get_base_tier_fees()
@@ -161,7 +125,7 @@ class CoinbaseConnector(ccxt_connector.CCXTConnector):
 
     def _get_base_tier_fees(self) -> (float, float):
         return (
-            DEFAULT_LIVE_TAKER_FEE_VALUE, DEFAULT_LIVE_MAKER_FEE_VALUE
+            DEFAULT_TAKER_FEE_VALUE, DEFAULT_MAKER_FEE_VALUE
         )
         # TODO uncomment this in case there is a way to fetch tier 0 fees in Coinbase
         # try:
@@ -197,74 +161,6 @@ class CoinbaseConnector(ccxt_connector.CCXTConnector):
         return await super()._edit_order_by_cancel_and_create(
             exchange_order_id, symbol, order_type, side, quantity, price, params
         )
-
-
-    @ccxt_client_util.converted_ccxt_common_errors
-    async def get_balance(self, **kwargs: dict):
-        """
-        Local override to handle pagination of coinbase's max of 250 assets per request
-        fetch balance (free + used) by currency
-        :return: balance dict
-        """
-        if not kwargs:
-            kwargs = {}
-        with self.error_describer():
-            results = await self._paginated_request(self.client.fetch_balance, params=kwargs)
-            merged_balances = {}
-            for result in results:
-                merged_balances.update(result)
-            return self.adapter.adapt_balance(merged_balances)
-
-    @_coinbase_retrier
-    async def _paginated_request(self, func, *args, **kwargs):
-        results = [await func(*args, **kwargs)]
-        if "params" not in kwargs:
-            kwargs["params"] = {}
-        next_cursor = ""
-        i = 0
-        for i in range(_MAX_CURSOR_ITERATIONS):
-            if next_cursor := self._get_next_cursor(results[-1], func.__name__):
-                self.logger.info(f"Large portfolio fetch in progress: request [{i}] processing ...")
-                kwargs["params"]["cursor"] = next_cursor
-                results.append(await func(*args, **kwargs))
-            else:
-                break
-        if next_cursor:
-            self.logger.error(
-                f"Not all {self.exchange_manager.exchange_name} {func.__name__} was fetched after [{i + 1}] "
-                f"iterations. This is unexpected."
-            )
-        return results
-
-    def _get_next_cursor(self, response: dict, func_name: str) -> str:
-        try:
-            return response[ccxt_constants.CCXT_INFO]["cursor"]
-        except KeyError:
-            self.logger.error(
-                f"Unexpected missing cursor key in {self.exchange_manager.exchange_name} {func_name} response info, "
-                f"available keys: {list(response[ccxt_constants.CCXT_INFO])}"
-            )
-        return ""
-
-    @ccxt_client_util.converted_ccxt_common_errors
-    async def _ensure_auth(self):
-        # Override of ccxt_connector._ensure_auth to use get_open_orders instead
-        try:
-            # load markets before calling _ensure_auth() to avoid fetching markets status while they are cached
-            with self.error_describer():
-                await self.load_symbol_markets(
-                    reload=not self.exchange_manager.use_cached_markets,
-                    market_filter=self.exchange_manager.market_filter,
-                )
-            # replace self.exchange_manager.exchange.get_balance by get_open_orders
-            # to mitigate coinbase balance cache side effect
-            await self.exchange_manager.exchange.get_open_orders(symbol="BTC/USDC")
-        except (octobot_trading.errors.AuthenticationError, ccxt.AuthenticationError) as e:
-            await self.client.close()
-            self.unauthenticated_exchange_fallback(e)
-        except Exception as e:
-            # Is probably handled in exchange tentacles, important thing here is that authentication worked
-            self.logger.debug(f"Error when checking exchange connection: {e}. This should not be an issue.")
 
 
 class Coinbase(exchanges.RestExchange):
@@ -376,6 +272,9 @@ class Coinbase(exchanges.RestExchange):
     async def get_account_id(self, **kwargs: dict) -> str:
         try:
             with self.connector.error_describer():
+                # warning might become deprecated
+                # https://docs.cloud.coinbase.com/sign-in-with-coinbase/docs/api-users
+                portfolio_id = None
                 accounts = await self.connector.client.fetch_accounts()
                 # use portfolio id when possible to enable "coinbase subaccounts" which are called "portfolios"
                 # note: oldest portfolio portfolio id == user id (from previous v2PrivateGetUser) when
@@ -404,8 +303,6 @@ class Coinbase(exchanges.RestExchange):
                 else:
                     portfolio_id = next(iter(portfolio_ids))
                 return portfolio_id
-        except ccxt.AuthenticationError:
-            raise
         except (ccxt.BaseError, octobot_trading.errors.OctoBotExchangeError) as err:
             self.logger.exception(
                 err, True,
@@ -456,6 +353,7 @@ class Coinbase(exchanges.RestExchange):
         # override for retrier
         return await super().cancel_order(exchange_order_id, symbol, order_type, **kwargs)
 
+    @_coinbase_retrier
     async def get_balance(self, **kwargs: dict):
         if "v3" not in kwargs:
             # use v3 to get free and total amounts (default is only returning free amounts)

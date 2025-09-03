@@ -60,7 +60,6 @@ $(document).ready(function() {
                 paymentMethod: paymentMethod,
                 redirectUrl: `${window.location.href}?refresh_packages=true&loop=true`
             }
-            let fetchedCheckoutUrl = null;
             try {
                 checkoutButtons.addClass("disabled");
                 button.html("<i class='fa fa-circle-notch fa-spin'></i> Loading checkout");
@@ -68,17 +67,10 @@ $(document).ready(function() {
                 if(checkoutUrl.url === null){
                     create_alert("success", "User already owns this extension", "");
                 } else {
-                    fetchedCheckoutUrl = checkoutUrl.url;
-                    $("p[data-role=\"checkout-url-fallback-part\"]").removeClass("d-none");
-                    const checkoutUrlFallbackLink = $("a[data-role=\"checkout-url-fallback\"]");
-                    checkoutUrlFallbackLink.attr("href", fetchedCheckoutUrl);
-                    checkoutUrlFallbackLink.text(fetchedCheckoutUrl);
-                    document.location.href = fetchedCheckoutUrl;
+                    document.location.href = checkoutUrl.url;
                 }
             } finally {
-                if(fetchedCheckoutUrl === null){
-                    checkoutButtons.removeClass("disabled");
-                }
+                checkoutButtons.removeClass("disabled");
                 button.html(origin_val);
             }
         })
